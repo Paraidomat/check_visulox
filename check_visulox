@@ -1,0 +1,131 @@
+#!/bin/bash
+#fschyra
+
+# check_visulox zum Ueberpruefen von Visulox-Diensten.
+
+exitstatus=0
+gwstatus=""
+osgdstatus=""
+visuloxstatus=""
+perfdata="|"
+
+# check Gateway-Status
+if [ -d "/opt/SUNWsgdg" ]; then
+        #Pruefen, ob Gateway laeuft.
+        sudo /opt/SUNWsgdg/bin/gateway status > /tmp/plaingatewaystatus.tmp
+
+        if [ $(cat /tmp/plaingatewaystatus.tmp | grep -q 'Accepting') ]; then
+                gwstatus="Gateway-Service for $HOSTNAME not running"
+                exitstatus=2
+        else
+                for host in ts2rvpsv011 ts2rvpsv012; do 
+                        perfdata="$perfdata ${host}_aip_connections=$(cat /tmp/plaingatewaystatus.tmp | grep '${host}.mvtc' | cut -d'(' -f 2 | cut -d')' -f 1);;;;"
+                done
+        fi
+
+        #Wenn Keepalived nicht lÃ¤uft
+        if [ $(ps -ef | grep keepalived | wc -l | grep -q '1') ]; then
+                exitstatus=2
+                gwstatus="$gwstatus keepalived for $HOSTNAME not running"
+        fi
+
+fi
+
+# check OSGD-Status
+if [ -d "/opt/tarantella" ]; then
+        tarantellastatus=$(sudo /opt/tarantella/bin/tarantella status | grep $HOSTNAME | awk '{print $4}')
+
+        if [ "$tarantellastatus" != "Accepting" ]; then
+                exitstatus=2
+                osdgstatus="Tarantella-Service for $HOSTNAME not running!"
+        else
+                perfdata="$perfdata tarantella_webtop_sessions=$(sudo /opt/tarantella/bin/tarantella status | grep Secure | cut -d' ' -f 8);;;;"
+                perfdata="$perfdata tarantella_emulator_sessions=$(sudo /opt/tarantella/bin/tarantella status | grep Protocol | cut -d' ' -f 9);;;;"
+        fi
+fi
+
+# check Visulox-Status
+if [ -d "/opt/visulox" ]; then
+        sudo /opt/visulox/bin/visulox status > /tmp/plainvisuloxstatus.tmp
+
+        for host in "ts2rvpsv011" "ts2rvpsv012" "ts2rvpsv013" "ts2rvpsv014"; do
+                if [ $(less /tmp/plainvisuloxstatus.tmp | grep $host | awk '{print $6}') != "up" ]; then
+                        visuloxstatus="Visulox-Service for ${host} not running!"
+                        exitstatus=2
+                fi
+        done
+
+        # Berechne Ende der Support-License fÃ¼r Visulox in Sekunden
+        visuloxsupportend=$(date -d "$(sudo /opt/visulox/bin/visulox license | grep Support | awk '{print $4}')" +"%s")
+        visuloxsupportlifetime=$(date -u -d "0 $visuloxsupportend sec - $(date +"%s") sec" +"%s")
+
+        if [ "$visuloxsupportlifetime" -lt 2592000 ]; then
+                if [ "$visuloxsupportlifetime" -lt "1123200" ]; then
+                        exitstatus=2
+                        visuloxstatus="Visulox Supportlicense will run out in less than 15 days!"
+                else
+                        if [ "$exitstatus" -lt "1" ]; then
+                                exitstatus=1
+                        fi
+                        visuloxstatus="Visulox Supportlicense will run out in less than 30 days!"
+                fi
+        fi
+
+        # Berechne Ende der Extended-License fÃ¼r Visulox in Sekunden
+        visuloxextendedend=$(date -d "$(sudo /opt/visulox/bin/visulox license | grep Extended | awk '{print $5}')" +"%s")
+        visuloxextendedlifetime=$(date -u -d "0 $visuloxsupportend sec - $(date +"%s") sec" +"%s")
+
+        if [ "$visuloxextendedlifetime" -lt 2592000 ]; then
+                if [ "$visuloxextendedlifetime" -lt "1123200" ]; then
+                        exitstatus=2
+                        visuloxstatus="${visuloxstatus} Visulox Supportlicense will run out in less than 15 days!"
+                else
+                        if [ "$exitstatus" -lt 1 ]; then
+                                exitstatus=1
+                        fi
+                        visuloxstatus="${visuloxstatus} Visulox Supportlicense will run out in less than 30 days!"
+                fi
+        fi
+
+        # Lese Visulox-Sessions aus:
+        users=$(sudo /opt/visulox/bin/visulox online -format csv | grep -i WORKSPACE | wc -l)
+        recorder=$(sudo /opt/visulox/bin/visulox online -format csv | grep -v WORKSPACE | wc -l)
+
+        let "users--"
+        let "recorder--"
+
+        if [ "$users" -gt 90 ]; then
+                if [ "$users" -gt 100 ]; then
+                        exitstatus=2
+                        visuloxstatus="${visuloxstatus} Visulox user-count is too high - Is tclconnector running?"
+                else
+                        if [ "$exitstatus" -lt 1 ]; then
+                                exitstatus=0
+                        fi
+                        visuloxstatus="${visuloxstatus} Visulox user-count is high."
+                fi
+        fi
+
+        if [ "$recorder" -gt 180 ]; then
+                if [ "$recorder" -gt 200 ]; then
+                        exitstatus=0
+                        visuloxstatus="${visuloxstatus} Visulox recorder-count is too high!"
+                else
+                        if [ "$exitstatus" -lt 1 ]; then
+                                exitstatus=0
+                        fi
+                        visuloxstatus="${visuloxstatus} Visulox recorder-count is high."
+                fi
+        fi
+
+
+        perfdata="$perfdata visulox_users=${users};90;100;; visulox_recorder=${recorder};180;200;;"
+fi
+
+if [ -z "$gwstatus" ] && [ -z "$osgdstatus" ] && [ -z "$visuloxstatus" ]; then
+        echo "OK - Everything is fine!${perfdata}" 
+        exit $exitstatus
+else
+        echo "$gwstatus $osgdstatus $visuloxstatus $perfdata"
+        exit $exitstatus
+fi
